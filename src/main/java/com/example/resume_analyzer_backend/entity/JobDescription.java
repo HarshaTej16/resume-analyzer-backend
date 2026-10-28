@@ -29,7 +29,7 @@ public class JobDescription {
     @Column(name = "company", length = 300)
     private String company;
 
-    @Column(name = "description", columnDefinition = "LONGTEXT", nullable = false)
+    @Column(name = "description", columnDefinition = "TEXT", nullable = false)
     private String description;
 
     @Column(name = "experience_req")

@@ -37,7 +37,7 @@ public class Resume {
     @Column(name = "file_type", length = 20)
     private String fileType;
 
-    @Column(name = "raw_text", columnDefinition = "LONGTEXT")
+    @Column(name = "raw_text", columnDefinition = "TEXT")
     private String rawText;
 
     @Enumerated(EnumType.STRING)
