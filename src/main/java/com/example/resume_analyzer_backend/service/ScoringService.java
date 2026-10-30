@@ -56,6 +56,31 @@ public class ScoringService {
         put("mentoring", "SOFT");        put("analytical", "SOFT");
     }};
 
+    /**
+     * Precompiled word-boundary patterns, one per skill. Plain String.contains()
+     * gave false positives ("r" matched every resume, "go" matched "google",
+     * "java" matched inside "javascript").
+     */
+    private static final Map<String, Pattern> SKILL_PATTERNS = buildSkillPatterns();
+
+    private static Map<String, Pattern> buildSkillPatterns() {
+        Map<String, Pattern> m = new LinkedHashMap<>();
+        for (String skill : SKILL_CATEGORIES.keySet()) {
+            m.put(skill, Pattern.compile(
+                "(?<![a-z0-9+#.])" + Pattern.quote(skill) + "(?![a-z0-9+#])"));
+        }
+        return m;
+    }
+
+    /**
+     * Matches ranges like: 2023 - Present, 2023 – 2024, Jan 2023 - Mar 2024,
+     * 06/2023 to 2024, 2022 — ongoing. Group 1 = start year, group 2 = end year or keyword.
+     */
+    private static final Pattern DATE_RANGE = Pattern.compile(
+        "((?:19|20)\\d{2})\\s*(?:[-\\u2013\\u2014]|to)\\s*(?:[A-Za-z]{3,9}\\.?\\s*|\\d{1,2}/)?" +
+        "((?:19|20)\\d{2}|present|current|now|ongoing|till date)",
+        Pattern.CASE_INSENSITIVE);
+
     private static final List<String> ACTION_VERBS = List.of(
         "developed","implemented","designed","led","managed","built","created",
         "improved","reduced","increased","optimized","delivered","architected",
@@ -78,7 +103,7 @@ public class ScoringService {
             log.warn("Resume text is empty");
             return zeroScores();
         }
-        String lower = resumeText.toLowerCase();
+        String lower = normalizeDegrees(resumeText).toLowerCase();
         log.info("Scoring resume — length: {} chars", lower.length());
 
         BigDecimal skills     = scoreSkillsInternal(lower);
@@ -108,7 +133,7 @@ public class ScoringService {
     }
 
     private BigDecimal scoreSkillsInternal(String lower) {
-        long count = SKILL_CATEGORIES.keySet().stream().filter(lower::contains).count();
+        long count = SKILL_CATEGORIES.keySet().stream().filter(k -> hasSkill(lower, k)).count();
         log.info("Skills matched: {}", count);
         double score = Math.min(100.0, 20.0 + (count * 5.0));
         if (count > 0 && score < 30) score = 30.0;
@@ -188,7 +213,7 @@ public class ScoringService {
         String lower = text.toLowerCase();
         List<Map<String, String>> found = new ArrayList<>();
         for (Map.Entry<String, String> e : SKILL_CATEGORIES.entrySet()) {
-            if (lower.contains(e.getKey())) {
+            if (hasSkill(lower, e.getKey())) {
                 found.add(Map.of("name", capitalize(e.getKey()),
                     "category", e.getValue(), "proficiency", "INTERMEDIATE"));
             }
@@ -198,8 +223,9 @@ public class ScoringService {
 
     public List<Map<String, Object>> extractEducation(String text) {
         List<Map<String, Object>> educations = new ArrayList<>();
-        String[] lines = text.split("\\n");
-        String lower   = text.toLowerCase();
+        String norm    = normalizeDegrees(text);
+        String[] lines = norm.split("\\n");
+        String lower   = norm.toLowerCase();
         Pattern yearPat = Pattern.compile("\\b(19|20)\\d{2}\\b");
 
         for (int i = 0; i < lines.length; i++) {
@@ -257,7 +283,7 @@ public class ScoringService {
         if (educations.isEmpty()) {
             String degree = "Not Specified";
             if (containsAny(lower,"phd","doctorate"))      degree = "PhD";
-            else if (containsAny(lower,"master","msc"))    degree = "Master's Degree";
+            else if (containsAny(lower,"master","msc","m.sc")) degree = "Master's Degree";
             else if (containsAny(lower,"bachelor","b.tech")) degree = "Bachelor's Degree";
             else if (containsAny(lower,"diploma"))         degree = "Diploma";
             if (!degree.equals("Not Specified") || lower.contains("education")) {
@@ -272,8 +298,9 @@ public class ScoringService {
 
     public List<Map<String, Object>> extractExperience(String text) {
         List<Map<String, Object>> experiences = new ArrayList<>();
-        String[] lines = text.split("\\n");
-        String lower = text.toLowerCase();
+        String norm    = normalizeDegrees(text);
+        String[] lines = norm.split("\\n");
+        String lower   = norm.toLowerCase();
         int eduStart = Integer.MAX_VALUE, eduEnd = Integer.MAX_VALUE;
 
         for (int i = 0; i < lines.length; i++) {
@@ -292,9 +319,6 @@ public class ScoringService {
             }
         }
 
-        Pattern rangePat = Pattern.compile(
-            "(20\\d{2}|19\\d{2})\\s*[-\\u2013]\\s*(20\\d{2}|present|current|now|till date)",
-            Pattern.CASE_INSENSITIVE);
         int currentYear = java.time.LocalDate.now().getYear();
 
         for (int i = 0; i < lines.length; i++) {
@@ -303,13 +327,13 @@ public class ScoringService {
             if (DEGREE_KEYWORDS.stream().anyMatch(lLine::contains)) continue;
             if (EDU_INSTITUTIONS.stream().anyMatch(lLine::contains)) continue;
 
-            Matcher m = rangePat.matcher(lines[i]);
+            Matcher m = DATE_RANGE.matcher(lines[i]);
             if (!m.find()) continue;
 
             try {
                 int start = Integer.parseInt(m.group(1));
                 String endStr = m.group(2).toLowerCase().trim();
-                boolean isCurr = containsAny(endStr,"present","current","now","till");
+                boolean isCurr = containsAny(endStr,"present","current","now","till","ongoing");
                 int end = isCurr ? currentYear : Integer.parseInt(m.group(2));
                 if (end < start || end - start > 50) continue;
 
@@ -434,14 +458,13 @@ public class ScoringService {
             Pattern.CASE_INSENSITIVE).matcher(text);
         if (m.find()) return new BigDecimal(m.group(1));
 
-        Matcher rm = Pattern.compile("(20\\d{2}|19\\d{2})\\s*[-\\u2013]\\s*(20\\d{2}|present|current)",
-            Pattern.CASE_INSENSITIVE).matcher(text);
+        Matcher rm = DATE_RANGE.matcher(text);
         int total = 0, cy = java.time.LocalDate.now().getYear();
         while (rm.find()) {
             try {
                 int s = Integer.parseInt(rm.group(1));
                 String es = rm.group(2).toLowerCase();
-                int e = containsAny(es,"present","current") ? cy : Integer.parseInt(rm.group(2));
+                int e = containsAny(es,"present","current","now","till","ongoing") ? cy : Integer.parseInt(rm.group(2));
                 if (e > s && e - s < 50) total += (e - s) * 12;
             } catch (NumberFormatException ignored) {}
         }
@@ -450,7 +473,7 @@ public class ScoringService {
     }
 
     public String detectEducationLevel(String text) {
-        String lower = text.toLowerCase();
+        String lower = normalizeDegrees(text).toLowerCase();
         if (containsAny(lower,"phd","ph.d","doctorate"))                          return "PhD";
         if (containsAny(lower,"master","msc","m.sc","mba","m.s","m.tech"))        return "Master's";
         if (containsAny(lower,"bachelor","b.sc","b.s","b.e","b.tech","b.a"))      return "Bachelor's";
@@ -478,6 +501,16 @@ public class ScoringService {
     private boolean containsAny(String text, String... terms) {
         for (String t : terms) if (text.contains(t)) return true;
         return false;
+    }
+
+    /** Word-boundary skill match so "r", "go" and "java" don't match inside other words. */
+    private boolean hasSkill(String lower, String skill) {
+        return SKILL_PATTERNS.get(skill).matcher(lower).find();
+    }
+
+    /** "B. Tech" / "b tech" / "M Sc" -> "B.Tech" / "b.tech" / "M.Sc" so degree keywords match. */
+    private String normalizeDegrees(String s) {
+        return s.replaceAll("(?i)\\b([bm])\\.?[ \\t]*(tech|sc)\\b", "$1.$2");
     }
 
     private BigDecimal bd(double value) {
